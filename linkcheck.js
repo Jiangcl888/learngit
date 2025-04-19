@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const xlsx = require('xlsx');
 const axios = require('axios');
-const inquirer = require('inquirer'); 
+const inquirer = require('inquirer');
+const ExcelJS = require('exceljs');
+
 // 检查链接是否可以访问
 async function checkLinkAccessibility(url) {
     try {
@@ -10,45 +11,6 @@ async function checkLinkAccessibility(url) {
         return response.status >= 200 && response.status < 400; // 状态码在 200-399 范围内视为有效
     } catch (error) {
         return false; // 如果发生错误（如超时或无效链接），返回 false
-    }
-}
-
-// 读取 Excel 文件并检测链接
-async function detectBrokenLinksInExcel(filePath) {
-    // 读取 Excel 文件
-    const workbook = xlsx.readFile(filePath);
-    const sheetName = workbook.SheetNames[0]; // 假设我们只处理第一个工作表
-    const worksheet = workbook.Sheets[sheetName];
-
-    // 将工作表转换为 JSON 格式
-    const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
-
-    console.log('开始检测链接...');
-    const brokenLinks = [];
-
-    for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
-        const row = data[rowIndex];
-        for (let colIndex = 0; colIndex < row.length; colIndex++) {
-            const cellValue = row[colIndex];
-            if (typeof cellValue === 'string' && isValidUrl(cellValue)) {
-                const isAccessible = await checkLinkAccessibility(cellValue);
-                if (!isAccessible) {
-                    brokenLinks.push({
-                        link: cellValue,
-                        location: `Row ${rowIndex + 1}, Column ${colIndex + 1}`
-                    });
-                }
-            }
-        }
-    }
-
-    if (brokenLinks.length > 0) {
-        console.log('发现以下无法访问的链接：');
-        brokenLinks.forEach((item, index) => {
-            console.log(`${index + 1}. 链接: ${item.link} | 位置: ${item.location}`);
-        });
-    } else {
-        console.log('所有链接均可访问！');
     }
 }
 
@@ -69,7 +31,7 @@ function listExcelFiles() {
     return files;
 }
 
-// 主函数：交互式选择文件
+// 主函数：交互式选择文件并处理
 (async () => {
     const excelFiles = listExcelFiles();
 
@@ -99,13 +61,58 @@ function listExcelFiles() {
     ];
 
     try {
-        const answers = await inquirer.prompt(questions); // 确保 inquirer 是最新版本
+        const answers = await inquirer.prompt(questions);
         const selectedFile = excelFiles[parseInt(answers.fileIndex, 10) - 1];
         const filePath = path.resolve(selectedFile); // 获取绝对路径
 
         console.log(`已选择文件: ${selectedFile}`);
-        await detectBrokenLinksInExcel(filePath);
+        await processExcelFile(filePath);
     } catch (err) {
         console.error('发生错误:', err);
     }
 })();
+
+// 处理 Excel 文件并标记错误链接
+async function processExcelFile(filePath) {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+
+    const worksheet = workbook.worksheets[0]; // 假设我们只处理第一个工作表
+    const brokenLinks = [];
+
+    // 遍历每个单元格
+    worksheet.eachRow((row, rowIndex) => {
+        row.eachCell((cell, colIndex) => {
+            if (typeof cell.value === 'string' && isValidUrl(cell.value)) {
+                const url = cell.value;
+                brokenLinks.push({
+                    url,
+                    location: { row: rowIndex, col: colIndex + 1 }, // 单元格位置
+                    cell
+                });
+            }
+        });
+    });
+
+    // 检测每个链接的状态
+    for (const link of brokenLinks) {
+        const isAccessible = await checkLinkAccessibility(link.url);
+        if (!isAccessible) {
+            console.log(`发现错误链接: ${link.url} | 位置: Row ${link.location.row}, Column ${link.location.col}`);
+            // 设置字体颜色为红色
+            link.cell.font = {
+                color: { argb: 'FFFF0000' }, // 设置字体颜色为红色
+                bold: true // 可选：加粗字体
+            };
+        }
+    }
+
+    if (brokenLinks.length > 0) {
+        // 保存修改后的 Excel 文件
+        const outputFilePath = path.join(path.dirname(filePath), `marked_${path.basename(filePath)}`);
+        await workbook.xlsx.writeFile(outputFilePath);
+        console.log(`已将错误链接标记为红色，并保存到新文件: ${outputFilePath}`);
+    } else {
+        console.log('所有链接均可访问！');
+    }
+}
